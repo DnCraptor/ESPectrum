@@ -55,7 +55,7 @@ visit https://zxespectrum.speccy.org/contacto
 #include <sys/unistd.h>
 #include <sys/stat.h>
 #include "esp_vfs_fat.h"
-#include "sdmmc_cmd.h"
+#include "driver/sdspi_host.h"
 
 using namespace std;
 
@@ -66,11 +66,20 @@ sdmmc_card_t *FileUtils::card;
 string FileUtils::SNA_Path = "/"; // DISK_SNA_DIR; // Current path on the SD (for future folder support)
 string FileUtils::TAP_Path = "/"; // DISK_TAP_DIR; // Current path on the SD (for future folder support)
 string FileUtils::DSK_Path = "/"; // DISK_DSK_DIR; // Current path on the SD (for future folder support)
+
+#ifdef SORT_NEW
+DISK_FTYPE FileUtils::fileTypes[3] = {
+    {"sna,z80,p",".s",2,2,0,""},
+    {"tap,tzx,",".t",2,2,0,""},
+    {"trd,scl",".d",2,2,0,""}
+};
+#else
 DISK_FTYPE FileUtils::fileTypes[3] = {
     {".sna,.SNA,.z80,.Z80,.p,.P",".s",2,2,0,""},
     {".tap,.TAP,.tzx,.TZX",".t",2,2,0,""},
     {".trd,.TRD,.scl,.SCL",".d",2,2,0,""}
 };
+#endif
 
 void FileUtils::initFileSystem() {
 
@@ -134,6 +143,15 @@ bool FileUtils::mountSDCard(int PIN_MISO, int PIN_MOSI, int PIN_CLK, int PIN_CS)
         vTaskDelay(20 / portTICK_PERIOD_MS);    
         return false;
     }
+
+    // This seems to fix problems when video framebuffer is too big (400x300 i.e.)
+    host.max_freq_khz = SDCARD_HOST_MAXFREQ;
+    host.set_card_clk(host.slot, SDCARD_HOST_MAXFREQ);
+
+    printf("SD Host max freq: %d\n",host.max_freq_khz);
+
+    // Card has been initialized, print its properties
+    sdmmc_card_print_info(stdout, card);
 
     vTaskDelay(20 / portTICK_PERIOD_MS);
 
@@ -259,6 +277,280 @@ void FileUtils::unmountSDCard() {
 //     return filelist;
 
 // }
+
+string toLower(const std::string& str) {
+    std::string lowerStr = str;
+    std::transform(lowerStr.begin(), lowerStr.end(), lowerStr.begin(), ::tolower);
+    return lowerStr;
+}
+
+// get extension in lowercase
+string FileUtils::getLCaseExt(const string& filename) {
+
+    size_t dotPos = filename.rfind('.'); // find the last dot position
+    if (dotPos == string::npos) {
+        return ""; // dot position don't found
+    }
+
+    // get the substring after dot
+    string extension = filename.substr(dotPos + 1);
+
+    // convert extension to lowercase
+//    for (char& c : extension) {
+//        c = ::tolower(static_cast<unsigned char>(c));
+//    }
+
+//    return extension;
+
+    return toLower( extension );
+
+}
+
+
+#ifdef SORT_NEW
+
+void FileUtils::DirToFile(string fpath, uint8_t ftype) {
+
+    FILE* fin = nullptr;
+    FILE* fout = nullptr;
+    char line[65];
+    string fname1 = "";
+    string fname2 = "";
+    string fnameLastSaved = "";
+
+    // Open directory to sort
+    string fdir = fpath.substr(0, fpath.length() - 1);
+    DIR* dir = opendir(fdir.c_str());
+    if (dir == NULL) {
+        // TO DO: Error dialog
+        printf("Error opening %s\n", fpath.c_str());
+        return;
+    }
+
+    // Remove previous dir file
+    remove((fpath + fileTypes[ftype].indexFilename).c_str());
+
+    OSD::progressDialog(OSD_FILE_INDEXING[Config::lang],OSD_FILE_INDEXING_1[Config::lang],0,0);
+
+    // Populate filexts with valid filename extensions
+    std::vector<std::string> filexts;
+    size_t pos = 0;
+    string ss = fileTypes[ftype].fileExts;
+    while ((pos = ss.find(",")) != string::npos) {
+        // printf("%s , ",ss.substr(0,pos).c_str());
+        filexts.push_back(ss.substr(0, pos));
+        ss.erase(0, pos + 1);
+    }
+    // printf("%s , ",ss.substr(0).c_str());
+    filexts.push_back(ss.substr(0));
+    // printf("\n");
+
+   // Count items to process
+    struct dirent* de;
+    int item_count = 0;
+    while ((de = readdir(dir)) != nullptr)
+        if (de->d_type == DT_REG || de->d_type == DT_DIR) item_count++;
+    rewinddir(dir);
+
+    int items_processed = 0;
+    unsigned long h = 0, high; // Directory Hash
+
+    OSD::elements = 0;
+    OSD::ndirs = 0;
+
+    bool readFile1 = false, readFile2 = true;
+    bool eof1 = true, eof2 = false;
+    bool holdFile2 = false;
+
+    int n = 1;
+
+    if (fpath != ( MountPoint + "/" ) ) {
+        fname1 = "  ..";
+        eof1 = false;
+    }
+
+    int bufferSize = item_count > DIR_CACHE_SIZE ? DIR_CACHE_SIZE : item_count;  // Size of buffer to read and sort
+    std::vector<std::string> buffer;
+
+    while ( !eof2 || ( fin && !feof(fin)) ) {
+        fnameLastSaved = "";
+    
+        holdFile2 = false;
+
+        fout = fopen((fpath + fileTypes[ftype].indexFilename + ".tmp." + std::to_string(n)).c_str(), "wb");
+        if ( !fout ) {
+            if (fin) fclose(fin);
+            closedir( dir );
+            // Close progress dialog
+            OSD::progressDialog("","",0,2);
+            return;
+        }
+
+        if (setvbuf(fout, NULL, _IOFBF, VBUF_SIZE) != 0) {
+            printf("setvbuf failed\n");
+        }        
+
+        while (1) {
+
+            if ( readFile1 ) {
+                if ( !fin || feof( fin ) ) eof1 = true;
+                if ( !eof1 ) {
+                    size_t res = fread( line, sizeof(char), 64, fin);
+                    if ( !res || feof( fin ) /*|| res != 64 */ ) {
+                        eof1 = true;
+                    } else {
+                        line[63] = '\0';
+                        fname1.assign(line);
+//                        fname1.erase(std::remove(fname1.begin(), fname1.end(), '\n'), fname1.end());
+                    }
+                }
+                readFile1 = false;
+            }
+
+            if ( readFile2 ) {
+
+                if (buffer.empty()) { // Fill buffer with directory entries
+
+                    while ( buffer.size() < bufferSize && (de = readdir(dir)) != nullptr ) {
+                        if (de->d_type == DT_REG || de->d_type == DT_DIR) {
+                            if (de->d_name[0] != '.') {
+                                string fname = de->d_name;
+                                if (de->d_type == DT_DIR) {
+                                    buffer.push_back( " " + fname );
+                                    OSD::ndirs++;
+                                } else if (std::find(filexts.begin(), filexts.end(), getLCaseExt(fname)) != filexts.end()) {
+                                    buffer.push_back( fname );
+                                    OSD::elements++;
+                                } else fname = "";
+                                // Calc hash
+                                for (int i = 0; i < fname.length(); i++) {
+                                    h = (h << 4) + fname[i];
+                                    if ((high = h & 0xF0000000))
+                                        h ^= high >> 24;
+                                    h &= ~high;
+                                }
+                            }
+                        }
+                    }
+
+                    // Sort buffer loaded with processed directory entries
+                    sort(buffer.begin(), buffer.end(), [](const string& a, const string& b) {
+                        return ::toLower(a) < toLower(b);
+                    });
+
+                }
+
+//                    if ( !de ) eof2 = true;
+
+                if (!buffer.empty()) {
+                    fname2 = buffer.front();
+                    buffer.erase(buffer.begin()); // Remove first element from buffer
+
+                    items_processed++;
+
+                    OSD::progressDialog("","",(float) 100 / ((float) item_count / (float) items_processed),1);
+                } else
+                if ( !de ) eof2 = true;
+
+                readFile2 = false;
+                holdFile2 = false;
+            }
+
+            string fnameToSave = "";
+
+            if ( eof1 ) {
+                if ( eof2 || holdFile2 || strcasecmp(fnameLastSaved.c_str(), fname2.c_str()) > 0 ) {
+                    break;
+                }
+                fnameToSave = fname2;
+                readFile2 = true;
+            } else if ( eof2 || strcasecmp(fname1.c_str(), fname2.c_str()) < 0 ) {
+                fnameToSave = fname1;
+                readFile1 = true;
+            } else if ( strcasecmp(fname1.c_str(), fname2.c_str()) > 0 && strcasecmp(fnameLastSaved.c_str(), fname2.c_str()) > 0 ) {
+                holdFile2 = true;
+                fnameToSave = fname1;
+                readFile1 = true;
+            } else {
+                if ( strcasecmp(fnameLastSaved.c_str(), fname2.c_str()) > 0 ) {
+                    break;
+                }
+                fnameToSave = fname2;
+                readFile2 = true;
+            }
+
+            string sw = fnameToSave + string(63 - fnameToSave.size(), ' ') + "\n";
+            if ( sw.length() > 64 ) sw = sw.substr(0,63) + "\n";
+            fwrite(sw.c_str(), sizeof(char), sw.length(), fout);
+            fnameLastSaved = fnameToSave;
+
+        }
+
+        if ( fin ) {
+            fclose(fin);
+            fin = nullptr;
+        }
+
+        fclose(fout);
+
+        if ( eof1 && eof2 ) break;
+
+        fin = fopen((fpath + fileTypes[ftype].indexFilename + ".tmp." + std::to_string(n)).c_str(), "rb");
+        if ( !fin ) {
+            closedir( dir );
+            // Close progress dialog
+            OSD::progressDialog("","",0,2);
+            return;
+        }
+
+        if (setvbuf(fin, NULL, _IOFBF, VBUF_SIZE) != 0) {
+            printf("setvbuf failed\n");
+        }        
+
+        eof1 = false;
+        readFile1 = true;
+
+        n++;
+    }
+
+    if ( fin ) fclose(fin);
+    closedir(dir);
+
+    rename((fpath + fileTypes[ftype].indexFilename + ".tmp." + std::to_string(n)).c_str(), (fpath + fileTypes[ftype].indexFilename).c_str());
+
+    // Add directory hash to last line of file
+    fout = fopen((fpath + fileTypes[ftype].indexFilename).c_str(), "a");
+    if ( !fout ) {
+        // Close progress dialog
+        OSD::progressDialog("","",0,2);
+        return;
+    }
+    fputs(std::to_string(h).c_str(), fout);
+    fclose(fout);
+
+    buffer.clear(); // Clear vector
+    std::vector<std::string>().swap(buffer); // free memory
+
+    filexts.clear(); // Clear vector
+    std::vector<std::string>().swap(filexts); // free memory    
+
+    if (--n) { // Remove temp files (if present)
+
+        OSD::progressDialog(OSD_FILE_INDEXING[Config::lang],OSD_FILE_INDEXING_3[Config::lang],0,1);
+
+        for (int i = 1; i <= n; i++) {
+            remove((fpath + fileTypes[ftype].indexFilename + ".tmp." + std::to_string(i)).c_str());
+            OSD::progressDialog("","",(float) 100 / ((float) n / (float) i),1);
+        }
+
+    }
+
+    // Close progress dialog
+    OSD::progressDialog("","",0,2);
+
+}
+
+#else
 
 void FileUtils::DirToFile(string fpath, uint8_t ftype) {
 
@@ -547,6 +839,8 @@ void FileUtils::Mergefiles(string fpath, uint8_t ftype, int chunk_cnt) {
     fout = NULL;
 
 }
+
+#endif
 
 bool FileUtils::hasSNAextension(string filename)
 {

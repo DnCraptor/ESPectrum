@@ -18,4 +18,7 @@ downloaded_fs*.bin
 /doc/**
 /releases
 /releases/**
-
+/src/disk.cpp
+/src/wd1793rvm.cpp
+/include/disk.h
+/include/wd1793rvm.h

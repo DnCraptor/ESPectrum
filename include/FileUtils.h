@@ -76,6 +76,7 @@ public:
     static void Mergefiles(string fpath, uint8_t ftype, int chunk_cnt);
     // static uint16_t       countFileEntriesFromDir(String path);
     // static string getSortedFileList(string fileDir);
+    static string getLCaseExt(const string& filename);
     static bool hasSNAextension(string filename);
     static bool hasZ80extension(string filename);
     static bool hasPextension(string filename);
@@ -126,7 +127,11 @@ private:
 #define SNA_128K_SIZE1 131103
 #define SNA_128K_SIZE2 147487
 
+#define SORT_NEW
 #define MAX_FNAMES_PER_CHUNK 128
+#define DIR_CACHE_SIZE 128
+#define SDCARD_HOST_MAXFREQ 19000
+#define VBUF_SIZE 1024
 
 // inline utility functions for uniform access to file/memory
 // and making it easy to to implement SNA/Z80 functions

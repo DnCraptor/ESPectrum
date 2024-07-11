@@ -190,13 +190,21 @@ string OSD::fileDialog(string &fdir, string title, uint8_t ftype, uint8_t mfcols
                             if (fname.compare(0,1,".") != 0) {
                                 // printf("Fname: %s Fname size: %d\n",fname.c_str(),fname.size());
 
+                                #ifndef SORT_NEW
                                 size_t fpos = fname.find_last_of(".");
+                                #endif
+
                                 // if (fpos != string::npos) {
                                 //     printf("%s %s\n", fname.c_str(), fname.substr(fname.find_last_of(".")).c_str());
                                 // }
 
                                 // if ((de->d_type == DT_DIR) || ((fname.size() > 3) && (std::find(filexts.begin(),filexts.end(),fname.substr(fname.size()-4)) != filexts.end()))) {
+
+                                #ifndef SORT_NEW
                                 if ((de->d_type == DT_DIR) || ((fpos != string::npos) && (std::find(filexts.begin(),filexts.end(),fname.substr(fpos)) != filexts.end()))) {                                    
+                                #else
+                                if ((de->d_type == DT_DIR) || ( (std::find(filexts.begin(),filexts.end(), FileUtils::getLCaseExt(fname)) != filexts.end()) /*(fpos != string::npos) && (std::find(filexts.begin(),filexts.end(),fname.substr(fpos)) != filexts.end())*/)) {
+                                #endif
 
                                     // Calculate name checksum
                                     for (int i = 0; i < fname.length(); i++) {
@@ -244,7 +252,33 @@ string OSD::fileDialog(string &fdir, string title, uint8_t ftype, uint8_t mfcols
         // There was no index or hashes are different: reIndex
         if (reIndex) {
 
+            multi_heap_info_t info;    
+            size_t ram_consumption;
+
+            heap_caps_get_info(&info, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT); // internal RAM, memory capable to store data or to create new task
+
+            printf("\n=======================================================\n");            
+            printf("ORDENANDO CARPETA %s\n",filedir.c_str());
+            printf("=======================================================\n");            
+            printf("\nTotal free bytes          : %d\n", info.total_free_bytes);
+            printf("Minimum free ever         : %d\n", info.minimum_free_bytes);
+
+            size_t minimum_before = info.minimum_free_bytes;
+
+            uint32_t time_start = esp_timer_get_time();
+
             FileUtils::DirToFile(filedir, ftype); // Prepare filelist
+
+            uint32_t time_elapsed = esp_timer_get_time() - time_start;
+
+            heap_caps_get_info(&info, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT); // internal RAM, memory capable to store data or to create new task
+
+            printf("TIEMPO DE ORDENACION      : %6.2f segundos\n", (float)time_elapsed / 1000000);
+            printf("Total free bytes  despues : %d\n", info.total_free_bytes);
+            printf("Minimum free ever despues : %d\n", info.minimum_free_bytes);
+            printf("Consumo RAM               : %d\n", minimum_before - info.minimum_free_bytes);
+
+            printf("\n=======================================================\n");            
 
             // stat((filedir + FileUtils::fileTypes[ftype].indexFilename).c_str(), &stat_buf);
 
